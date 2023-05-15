@@ -1,112 +1,155 @@
-import Taro from '@tarojs/taro';
-import { useMemoizedFn, useUnmount } from 'ahooks';
 import { useEffect, useRef, useState } from 'react';
+import { useLatest, useMemoizedFn, useUnmount } from 'ahooks';
+import Taro from '@tarojs/taro';
 
 export enum ReadyState {
-  CONNECTING,
-  OPEN,
-  CLOSING,
-  CLOSED,
+  CONNECTING = 0,
+  OPEN = 1,
+  CLOSING = 2,
+  CLOSED = 3,
 }
-interface Options {
+
+export interface Options {
   reconnectLimit?: number;
   reconnectInterval?: number;
   manual?: boolean;
-  onOpen?: (event: WebSocketEventMap['open'], instance: WebSocket) => void;
-  onClose?: (event: WebSocketEventMap['close'], instance: WebSocket) => void;
-  onMessage?: (
-    message: WebSocketEventMap['message'],
-    instance: WebSocket
+  onOpen?: (
+    event: Taro.SocketTask.OnOpenCallbackResult,
+    instance: Taro.SocketTask
   ) => void;
-  onError?: (event: WebSocketEventMap['error'], instance: WebSocket) => void;
-  protocols?: string | string[];
+  onClose?: (
+    event: Taro.SocketTask.OnCloseCallbackResult,
+    instance: Taro.SocketTask
+  ) => void;
+  onMessage?: (
+    message: Taro.SocketTask.OnMessageCallbackResult<any>,
+    instance: Taro.SocketTask
+  ) => void;
+  onError?: (
+    event: Taro.SocketTask.OnErrorCallbackResult,
+    instance: Taro.SocketTask
+  ) => void;
+  protocols?: string[];
 }
-interface Result {
-  latestMessage?: string;
-  sendMessage: (msg: string) => void;
-  disconnect: () => void;
-  connect: () => void;
+
+export interface Result {
+  latestMessage?: Taro.SocketTask.OnMessageCallbackResult<any>;
+  sendMessage?: (message: Taro.sendSocketMessage.Option) => void;
+  disconnect?: () => void;
+  connect?: () => void;
   readyState: ReadyState;
   webSocketIns?: Taro.SocketTask;
 }
 
-const useWebsocket = (socketUrl: string, options: Options = {}): Result => {
+export default function useWebSocket(
+  socketUrl: string,
+  options: Options = {}
+): Result {
   const {
-    reconnectLimit = 5,
-    reconnectInterval = 5 * 1000,
+    reconnectLimit = 3,
+    reconnectInterval = 3 * 1000,
     manual = false,
+    onOpen,
+    onClose,
+    onMessage,
+    onError,
+    protocols,
   } = options;
-  //   const [service,method] = socketUrl.split('/ws/')[1].split('/')
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>();
+
+  const onOpenRef = useLatest(onOpen);
+  const onCloseRef = useLatest(onClose);
+  const onMessageRef = useLatest(onMessage);
+  const onErrorRef = useLatest(onError);
+
   const reconnectTimesRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const websocketRef = useRef<Taro.SocketTask>();
+
   const unmountedRef = useRef(false);
 
-  const [latestMessage, setLatestMessage] = useState();
+  const [latestMessage, setLatestMessage] = useState<
+    Taro.SocketTask.OnMessageCallbackResult<any>
+  >();
   const [readyState, setReadyState] = useState<ReadyState>(ReadyState.CLOSED);
 
-  const sendMessage = (data: string) => {
-    if (readyState === ReadyState.OPEN) {
-      Taro.sendSocketMessage({ data });
-    } else {
-      throw new Error('WebSocket disconnected');
-    }
-  };
-  const connectWs = () => {
-    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-    if (readyState === ReadyState.OPEN) Taro.closeSocket();
-    Taro.connectSocket({
-      url: socketUrl,
-    }).then((SocketTask) => {
-    //   console.log(SocketTask, 'SocketTask');
-      setReadyState(ReadyState.CONNECTING);
-      SocketTask.onError((res) => {
-        if (unmountedRef.current) return;
-        console.log(res, 'WebSocket连接打开失败，请检查！');
-        reconnect();
-        setReadyState(SocketTask.readyState || ReadyState.CLOSED);
-      });
-      SocketTask.onClose((res) => {
-        if (unmountedRef.current) return;
-        console.log(res, 'WebSocket 已关闭！');
-        setReadyState(ReadyState.CLOSING);
-        reconnect();
-        setReadyState(SocketTask.readyState || ReadyState.CLOSED);
-      });
-      SocketTask.onOpen((res) => {
-        if (unmountedRef.current) return;
-        console.log(res, 'WebSocket连接已打开！');
-        reconnectTimesRef.current = 0;
-        setReadyState(SocketTask.readyState || ReadyState.OPEN);
-      });
-      SocketTask.onMessage((res) => {
-        if (unmountedRef.current) return;
-        // console.log('收到服务器内容：' + res.data);
-        setLatestMessage(res.data);
-      });
-      websocketRef.current = SocketTask;
-    });
-  };
   const reconnect = () => {
     if (
-      reconnectTimesRef.current <= reconnectLimit &&
-      readyState !== ReadyState.OPEN
+      reconnectTimesRef.current < reconnectLimit &&
+      websocketRef.current?.readyState !== ReadyState.OPEN
     ) {
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+      }
+
       reconnectTimerRef.current = setTimeout(() => {
+        // eslint-disable-next-line @typescript-eslint/no-use-before-define
         connectWs();
         reconnectTimesRef.current++;
       }, reconnectInterval);
     }
   };
+
+  const connectWs = () => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+    }
+    if (websocketRef.current) {
+      websocketRef.current.close({});
+    }
+    Taro.connectSocket({ url: socketUrl, protocols }).then((SocketTask) => {
+      console.log(socketUrl, SocketTask, 'SocketTask');
+      setReadyState(ReadyState.CONNECTING);
+      SocketTask.onError((event) => {
+        if (unmountedRef.current) return;
+        console.log(event, 'WebSocket连接打开失败，请检查！');
+        reconnect();
+        onErrorRef.current?.(event, SocketTask);
+        setReadyState(SocketTask.readyState || ReadyState.CLOSED);
+      });
+      SocketTask.onOpen((event) => {
+        if (unmountedRef.current) return;
+        console.log(event, 'WebSocket连接已打开！');
+        onOpenRef.current?.(event, SocketTask);
+        reconnectTimesRef.current = 0;
+        setReadyState(SocketTask.readyState || ReadyState.OPEN);
+      });
+      SocketTask.onMessage((message) => {
+        if (unmountedRef.current) return;
+        // console.log('收到服务器内容：' + message.data);
+        onMessageRef.current?.(message, SocketTask);
+        setLatestMessage(message);
+      });
+      SocketTask.onClose((event) => {
+        if (unmountedRef.current) return;
+        console.log(event, 'WebSocket 已关闭！');
+        reconnect();
+        onCloseRef.current?.(event, SocketTask);
+        setReadyState(SocketTask.readyState || ReadyState.CLOSED);
+      });
+      websocketRef.current = SocketTask;
+    });
+  };
+
+  const sendMessage = (message: Taro.sendSocketMessage.Option) => {
+    if (readyState === ReadyState.OPEN) {
+      console.log(message, 'sendMessage');
+      websocketRef.current?.send(message);
+    } else {
+      throw new Error('WebSocket disconnected');
+    }
+  };
+
   const connect = () => {
     reconnectTimesRef.current = 0;
     connectWs();
   };
+
   const disconnect = () => {
-    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-    if (readyState === ReadyState.OPEN) Taro.closeSocket();
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+    }
     reconnectTimesRef.current = reconnectLimit;
+    websocketRef.current?.close({});
   };
 
   useEffect(() => {
@@ -120,6 +163,7 @@ const useWebsocket = (socketUrl: string, options: Options = {}): Result => {
     unmountedRef.current = true;
     disconnect();
   });
+
   return {
     latestMessage,
     sendMessage: useMemoizedFn(sendMessage),
@@ -128,6 +172,4 @@ const useWebsocket = (socketUrl: string, options: Options = {}): Result => {
     readyState,
     webSocketIns: websocketRef.current,
   };
-};
-
-export default useWebsocket;
+}
